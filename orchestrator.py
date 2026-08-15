@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-三位一体空投系统 - 持续运行版
+三位一体空投系统 - 持续运行 + HTTP 健康检查
 """
 
 import os
@@ -9,8 +9,10 @@ import json
 import time
 import random
 import logging
+import threading
 import requests
 from datetime import datetime
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
 # ===== 强制输出日志 =====
 sys.stderr = sys.stdout
@@ -142,6 +144,28 @@ def run_scan():
     send_telegram(report)
     logger.info("报告已发送")
 
+# ===== HTTP 健康检查服务器 =====
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == '/health' or self.path == '/':
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/plain')
+            self.end_headers()
+            self.wfile.write(b'OK')
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def log_message(self, format, *args):
+        # 不打印 HTTP 访问日志，避免干扰
+        pass
+
+def start_http_server():
+    port = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(('', port), HealthHandler)
+    logger.info(f"🌐 HTTP 服务器启动，监听端口 {port}")
+    server.serve_forever()
+
 # ===== 主循环 =====
 def main_loop():
     logger.info("🔄 空投雷达持续运行模式启动")
@@ -157,5 +181,12 @@ def main_loop():
             logger.error(f"扫描异常: {e}")
             time.sleep(60)  # 出错等待 1 分钟重试
 
+# ===== 启动 =====
 if __name__ == "__main__":
+    # 启动 HTTP 服务器线程（后台）
+    http_thread = threading.Thread(target=start_http_server, daemon=True)
+    http_thread.start()
+    logger.info("✅ HTTP 健康检查已启动")
+
+    # 启动主循环
     main_loop()
