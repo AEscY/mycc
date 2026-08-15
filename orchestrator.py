@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-三位一体空投系统 - 完整版 v3.0
-新增：Telegram 交互命令（/start, /scan now, /stats, /bind wallet）
+三位一体空投系统 - 交互式按钮版 v4.0
 """
 
 import os
@@ -14,7 +13,7 @@ import threading
 import requests
 from datetime import datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse
 
 # ===== 强制输出日志 =====
 sys.stderr = sys.stdout
@@ -23,22 +22,23 @@ logger = logging.getLogger(__name__)
 
 # ===== 环境变量 =====
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-CHAT_ID = os.environ.get("CHAT_ID")          # 默认接收报告的 chat_id
+CHAT_ID = os.environ.get("CHAT_ID")
 WALLET_ADDRESSES = os.environ.get("WALLET_ADDRESSES", "").split(",")
 
 # ===== 全局变量 =====
 last_projects = []
 data_source_status = "未知"
-last_scan_result = None   # 存储最近一次扫描的详细结果
-user_wallets = {}         # 存储用户绑定的钱包地址 {chat_id: wallet_address}
+last_scan_result = None
+user_wallets = {}          # {chat_id: wallet_address}
+user_states = {}           # {chat_id: state}  state: None, "awaiting_wallet"
 
-logger.info("🚀 三位一体空投系统启动 v3.0 (交互版)")
+logger.info("🚀 三位一体空投系统启动 v4.0 (交互式按钮)")
 logger.info(f"默认钱包数量: {len([w for w in WALLET_ADDRESSES if w.strip()])}")
 
 # ============================================================
-# Telegram 消息发送（支持指定 chat_id）
+# Telegram API 辅助函数
 # ============================================================
-def send_telegram(text, chat_id=None, parse_mode="Markdown"):
+def send_telegram(text, chat_id=None, parse_mode="Markdown", reply_markup=None):
     if chat_id is None:
         chat_id = CHAT_ID
     if not BOT_TOKEN or not chat_id:
@@ -51,11 +51,38 @@ def send_telegram(text, chat_id=None, parse_mode="Markdown"):
             "parse_mode": parse_mode,
             "disable_web_page_preview": True
         }
+        if reply_markup:
+            payload["reply_markup"] = reply_markup
         resp = requests.post(url, json=payload, timeout=10)
         return resp.status_code == 200
     except Exception as e:
         logger.error(f"Telegram 发送失败: {e}")
         return False
+
+def answer_callback_query(callback_query_id, text=None, show_alert=False):
+    if not BOT_TOKEN:
+        return
+    try:
+        url = f"https://api.telegram.org/bot{BOT_TOKEN}/answerCallbackQuery"
+        payload = {"callback_query_id": callback_query_id}
+        if text:
+            payload["text"] = text
+            payload["show_alert"] = show_alert
+        requests.post(url, json=payload, timeout=5)
+    except Exception as e:
+        logger.error(f"AnswerCallbackQuery 失败: {e}")
+
+# ============================================================
+# 菜单按钮构造
+# ============================================================
+def get_main_menu():
+    return {
+        "inline_keyboard": [
+            [{"text": "🔄 立即扫描", "callback_data": "scan_now"}],
+            [{"text": "📊 查看统计", "callback_data": "show_stats"}],
+            [{"text": "🔗 绑定钱包", "callback_data": "bind_wallet"}]
+        ]
+    }
 
 # ============================================================
 # 智能评分
@@ -112,14 +139,13 @@ def get_priority(score):
         return 4
 
 # ============================================================
-# AI 情报（数据源状态追踪）
+# AI 情报
 # ============================================================
 def run_ai_agent():
     global data_source_status
     logger.info("📡 AI 情报扫描...")
     projects = []
     data_source_status = "MCP"
-
     try:
         payload = {
             "jsonrpc": "2.0",
@@ -167,7 +193,7 @@ def run_ai_agent():
         ]
 
 # ============================================================
-# 实时推送（检测新项目）
+# 实时推送
 # ============================================================
 def check_and_push_new_projects(current_projects):
     global last_projects
@@ -183,7 +209,7 @@ def check_and_push_new_projects(current_projects):
     last_projects = current_projects
 
 # ============================================================
-# Hunter 验证
+# Hunter
 # ============================================================
 def run_hunter(projects):
     logger.info("🔍 Hunter 验证...")
@@ -192,7 +218,7 @@ def run_hunter(projects):
     return verified
 
 # ============================================================
-# 专用机器人（支持传入钱包地址）
+# 专用机器人
 # ============================================================
 def run_kite_bot(wallet):
     logger.info(f"🪁 Kite AI: {wallet[:8]}...")
@@ -215,15 +241,12 @@ def run_arb_claim(wallet):
     return True, ["check_eligibility", "claim"]
 
 # ============================================================
-# 核心扫描函数（返回详细结果）
+# 核心扫描函数
 # ============================================================
 def run_scan(chat_id_to_notify=None):
-    """执行扫描并返回结果，可指定通知的 chat_id"""
     global data_source_status, last_scan_result
     start = datetime.now()
     logger.info("🚀 开始扫描...")
-
-    # 1. AI 发现
     all_projects = run_ai_agent()
     if not all_projects:
         msg = "⚠️ 未发现任何项目"
@@ -231,15 +254,12 @@ def run_scan(chat_id_to_notify=None):
         return None
 
     check_and_push_new_projects(all_projects)
-
-    # 2. Hunter 验证
     verified_projects = run_hunter(all_projects)
     if not verified_projects:
         msg = "⚠️ 所有项目评分过低，跳过执行"
         send_telegram(msg, chat_id_to_notify)
         return None
 
-    # 3. 评分排序
     scored_projects = []
     for p in verified_projects:
         score = score_project(p)
@@ -251,7 +271,7 @@ def run_scan(chat_id_to_notify=None):
         })
     scored_projects.sort(key=lambda x: x["priority"])
 
-    # 4. 获取要使用的钱包列表（优先使用绑定钱包）
+    # 获取钱包
     wallets = []
     if chat_id_to_notify and chat_id_to_notify in user_wallets:
         wallets = [user_wallets[chat_id_to_notify]]
@@ -260,7 +280,6 @@ def run_scan(chat_id_to_notify=None):
     else:
         wallets = []
 
-    # 5. 执行机器人
     bot_results = []
     task_details = {}
     for wallet in wallets:
@@ -282,7 +301,6 @@ def run_scan(chat_id_to_notify=None):
             task_details[f"Arbitrum ({wallet_key})"] = tasks
         time.sleep(random.randint(1, 3))
 
-    # 6. 生成报告
     elapsed = (datetime.now() - start).seconds
     project_list = "\n".join([
         f"  {i+1}. {p['name']} — {p['score']}分 {p['recommendation']}"
@@ -317,13 +335,10 @@ def run_scan(chat_id_to_notify=None):
 ⏱ 耗时: {elapsed} 秒
 🕒 时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 """
-    # 发送给指定用户
     send_telegram(report, chat_id_to_notify)
-    # 同时发送给默认 CHAT_ID（如果不同且存在）
     if chat_id_to_notify and chat_id_to_notify != CHAT_ID:
         send_telegram(report, CHAT_ID)
 
-    # 保存结果
     last_scan_result = {
         "projects": scored_projects,
         "bot_results": bot_results,
@@ -332,35 +347,26 @@ def run_scan(chat_id_to_notify=None):
         "elapsed": elapsed,
         "data_source": data_source_status
     }
-
     return last_scan_result
 
 # ============================================================
-# Telegram 命令处理
+# 命令处理
 # ============================================================
 def handle_command(chat_id, command_text):
-    """处理用户命令"""
     logger.info(f"收到命令: {command_text} (from {chat_id})")
     parts = command_text.strip().split()
     if not parts:
         return
-
     cmd = parts[0].lower()
 
     # /start
     if cmd == "/start":
-        menu = """
+        menu_text = """
 🤖 *空投雷达 Bot*
 
-可用命令:
-/start - 显示此菜单
-/scan now - 立即执行一次扫描
-/stats - 查看最近一次扫描统计
-/bind wallet 0x... - 绑定你的钱包地址
-
-系统每2小时自动扫描一次，发现新项目会实时推送。
+点击下方按钮即可操作：
 """
-        send_telegram(menu, chat_id)
+        send_telegram(menu_text, chat_id, reply_markup=json.dumps(get_main_menu()))
         return
 
     # /scan now
@@ -374,7 +380,7 @@ def handle_command(chat_id, command_text):
     # /stats
     if cmd == "/stats":
         if last_scan_result is None:
-            send_telegram("📊 暂无扫描数据，请先执行 /scan now", chat_id)
+            send_telegram("📊 暂无扫描数据，请先执行扫描", chat_id)
             return
         stats = last_scan_result
         msg = f"""
@@ -398,14 +404,62 @@ def handle_command(chat_id, command_text):
             send_telegram("❌ 钱包地址格式错误，请提供以 0x 开头的地址", chat_id)
             return
         user_wallets[chat_id] = wallet
+        user_states[chat_id] = None
+        send_telegram(f"✅ 钱包绑定成功: `{wallet[:8]}...`", chat_id)
+        return
+
+    # 处理纯文本消息（可能用于绑定钱包）
+    if user_states.get(chat_id) == "awaiting_wallet":
+        wallet = command_text.strip()
+        if len(wallet) < 10 or not wallet.startswith("0x"):
+            send_telegram("❌ 地址格式错误，请发送以 0x 开头的正确地址", chat_id)
+            return
+        user_wallets[chat_id] = wallet
+        user_states[chat_id] = None
         send_telegram(f"✅ 钱包绑定成功: `{wallet[:8]}...`", chat_id)
         return
 
     # 未知命令
-    send_telegram("❌ 未知命令，请输入 /start 查看菜单", chat_id)
+    send_telegram("❌ 未知命令，请点击菜单按钮操作", chat_id)
 
 # ============================================================
-# HTTP 服务器（支持 Webhook）
+# 回调处理
+# ============================================================
+def handle_callback(chat_id, callback_query_id, data):
+    logger.info(f"收到回调: {data} (from {chat_id})")
+    if data == "scan_now":
+        answer_callback_query(callback_query_id, "⏳ 正在扫描...")
+        send_telegram("⏳ 正在扫描，请稍候...", chat_id)
+        result = run_scan(chat_id)
+        if result is None:
+            send_telegram("❌ 扫描失败或未发现项目", chat_id)
+    elif data == "show_stats":
+        answer_callback_query(callback_query_id, "📊 获取统计...")
+        if last_scan_result is None:
+            send_telegram("📊 暂无扫描数据，请先执行扫描", chat_id)
+            return
+        stats = last_scan_result
+        msg = f"""
+📊 *最近扫描统计*
+- 时间: {stats['timestamp']}
+- 发现项目: {len(stats['projects'])} 个
+- 执行任务: {len(stats['bot_results'])} 项
+- 数据源: {stats['data_source']}
+- 耗时: {stats['elapsed']} 秒
+
+📋 项目列表:
+{chr(10).join([f"  • {p['name']} ({p['score']}分)" for p in stats['projects'][:5]])}
+"""
+        send_telegram(msg, chat_id)
+    elif data == "bind_wallet":
+        answer_callback_query(callback_query_id, "🔗 请发送你的钱包地址")
+        user_states[chat_id] = "awaiting_wallet"
+        send_telegram("🔗 请发送你的钱包地址（以 0x 开头）", chat_id)
+    else:
+        answer_callback_query(callback_query_id, "❌ 未知操作", show_alert=True)
+
+# ============================================================
+# HTTP 服务器
 # ============================================================
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -424,14 +478,24 @@ class Handler(BaseHTTPRequestHandler):
                 content_length = int(self.headers.get('Content-Length', 0))
                 post_data = self.rfile.read(content_length)
                 update = json.loads(post_data.decode('utf-8'))
+                logger.info(f"收到更新: {update}")
 
-                # 提取消息
-                if 'message' in update:
+                # 处理回调
+                if 'callback_query' in update:
+                    callback = update['callback_query']
+                    chat_id = callback['message']['chat']['id']
+                    data = callback['data']
+                    callback_id = callback['id']
+                    handle_callback(chat_id, callback_id, data)
+
+                # 处理消息
+                elif 'message' in update:
                     message = update['message']
                     chat_id = message['chat']['id']
                     if 'text' in message:
                         command_text = message['text']
                         handle_command(chat_id, command_text)
+
                 self.send_response(200)
                 self.end_headers()
                 self.wfile.write(b'OK')
@@ -453,51 +517,40 @@ def start_http_server():
     server.serve_forever()
 
 # ============================================================
-# 设置 Telegram Webhook
+# 设置 Webhook
 # ============================================================
 def set_webhook():
     if not BOT_TOKEN:
-        logger.error("未设置 BOT_TOKEN，无法设置 webhook")
         return
-    public_url = os.environ.get("PUBLIC_URL")
+    public_url = os.environ.get("PUBLIC_URL") or os.environ.get("RENDER_EXTERNAL_URL")
     if not public_url:
-        # 尝试从 Render 环境获取
-        public_url = os.environ.get("RENDER_EXTERNAL_URL")
-    if not public_url:
-        logger.warning("未设置 PUBLIC_URL，webhook 可能无法工作，请手动设置")
+        logger.warning("未设置 PUBLIC_URL，webhook 可能无法工作")
         return
     webhook_url = f"{public_url}/webhook"
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook"
     try:
-        resp = requests.post(url, json={"url": webhook_url}, timeout=10)
-        if resp.status_code == 200:
-            data = resp.json()
-            if data.get("ok"):
-                logger.info(f"✅ Webhook 设置成功: {webhook_url}")
-            else:
-                logger.error(f"Webhook 设置失败: {data}")
+        resp = requests.post(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook",
+            json={"url": webhook_url},
+            timeout=10
+        )
+        if resp.status_code == 200 and resp.json().get("ok"):
+            logger.info(f"✅ Webhook 设置成功: {webhook_url}")
         else:
-            logger.error(f"Webhook 请求失败: {resp.status_code}")
+            logger.error(f"Webhook 设置失败: {resp.text}")
     except Exception as e:
-        logger.error(f"Webhook 设置异常: {e}")
+        logger.error(f"Webhook 异常: {e}")
 
 # ============================================================
 # 主循环
 # ============================================================
 def main_loop():
-    logger.info("🔄 空投雷达持续运行模式 v3.0 (交互版)")
+    logger.info("🔄 空投雷达持续运行模式 v4.0 (交互式按钮)")
     logger.info("⏰ 每 2 小时执行一次扫描")
-    logger.info("📱 发现新项目立即推送，支持 /start /scan now /stats /bind wallet")
-
-    # 首次启动时设置 webhook
     set_webhook()
-
     while True:
         try:
-            run_scan()  # 自动扫描（默认发给 CHAT_ID）
-            wait_seconds = 2 * 60 * 60
-            logger.info(f"⏳ 等待 {wait_seconds/3600} 小时后执行下一次...")
-            time.sleep(wait_seconds)
+            run_scan()
+            time.sleep(2 * 60 * 60)
         except Exception as e:
             logger.error(f"扫描异常: {e}")
             time.sleep(60)
