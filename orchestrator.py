@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-三位一体空投系统 - 完整单文件版
+三位一体空投系统 - 持续运行版
 """
 
 import os
@@ -17,26 +17,22 @@ sys.stderr = sys.stdout
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# ===== 环境变量（从 Render 读取） =====
+# ===== 环境变量 =====
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
 WALLET_ADDRESSES = os.environ.get("WALLET_ADDRESSES", "").split(",")
 
-logger.info("🚀 三位一体空投系统启动")
-
 # ===== Telegram 推送 =====
 def send_telegram(text):
     if not BOT_TOKEN or not CHAT_ID:
-        logger.error("未设置 BOT_TOKEN 或 CHAT_ID")
         return
     try:
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
         requests.post(url, json={"chat_id": CHAT_ID, "text": text[:4000]}, timeout=10)
-        logger.info("Telegram 发送成功")
     except Exception as e:
         logger.error(f"Telegram 发送失败: {e}")
 
-# ===== AI 情报模块 =====
+# ===== AI 情报 =====
 def run_ai_agent():
     logger.info("📡 AI 情报扫描...")
     projects = []
@@ -79,7 +75,7 @@ def run_ai_agent():
 
     return list(set(projects))[:20]
 
-# ===== Hunter 验证 =====
+# ===== Hunter =====
 def run_hunter(projects):
     logger.info("🔍 Hunter 验证...")
     return projects
@@ -103,23 +99,19 @@ def run_arb_claim(wallet):
     logger.info(f"🧿 Arbitrum: {wallet[:8]}...")
     return True
 
-# ===== 主程序 =====
-def main():
+# ===== 执行一次完整扫描 =====
+def run_scan():
     start = datetime.now()
-    logger.info("🚀 系统启动")
+    logger.info("🚀 开始扫描...")
 
-    # 1. AI 发现
     ai_projects = run_ai_agent()
     if not ai_projects:
         send_telegram("⚠️ 未发现项目")
         return
-    logger.info(f"发现 {len(ai_projects)} 个项目")
 
-    # 2. Hunter 验证
     all_projects = run_hunter(ai_projects)
-    logger.info(f"验证完成，共 {len(all_projects)} 个项目")
+    logger.info(f"共 {len(all_projects)} 个项目")
 
-    # 3. 机器人执行
     bot_results = []
     for wallet in WALLET_ADDRESSES:
         wallet = wallet.strip()
@@ -133,13 +125,12 @@ def main():
             bot_results.append(f"Arbitrum: {'✅' if run_arb_claim(wallet) else '❌'}")
         time.sleep(random.randint(1, 3))
 
-    # 4. 报告
     elapsed = (datetime.now() - start).seconds
     project_list = "\n".join([f"  • {p}" for p in all_projects[:10]])
     report = f"""
-✅ 三位一体空投系统执行完毕
+✅ 空投扫描完成
 
-📊 发现项目 ({len(all_projects)} 个):
+📊 发现 {len(all_projects)} 个项目:
 {project_list}
 
 🤖 执行结果:
@@ -151,5 +142,20 @@ def main():
     send_telegram(report)
     logger.info("报告已发送")
 
+# ===== 主循环 =====
+def main_loop():
+    logger.info("🔄 空投雷达持续运行模式启动")
+    logger.info(f"⏰ 每 2 小时执行一次扫描")
+
+    while True:
+        try:
+            run_scan()
+            wait_seconds = 2 * 60 * 60  # 2 小时
+            logger.info(f"⏳ 等待 {wait_seconds/3600} 小时后执行下一次...")
+            time.sleep(wait_seconds)
+        except Exception as e:
+            logger.error(f"扫描异常: {e}")
+            time.sleep(60)  # 出错等待 1 分钟重试
+
 if __name__ == "__main__":
-    main()
+    main_loop()
